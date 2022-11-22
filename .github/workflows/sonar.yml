@@ -13,6 +13,8 @@ on:
         required: true
       VPN_PRIVATEKEY:
         required: true
+      SONAR_TOKEN:
+        required: true
 
 jobs:
   sonar:
