@@ -13,8 +13,6 @@ on:
         required: true
       VPN_PRIVATEKEY:
         required: true
-      VPN_PUBLICKEY:
-        required: true
       SONAR_TOKEN:
         required: true
 
@@ -30,7 +28,7 @@ jobs:
 
       - run: echo "${{ secrets.VPN_PRIVATEKEY }}" > privatekey
 
-      - run: echo "${{ secrets.VPN_PUBLICKEY }}" > publickey
+      - run: echo "yN3TXjZDCVrY4T0Y0x73Cv0MRsrdaE4+D9h3Z60Czmo=" > publickey
 
       - run: sudo ip link add dev wg0 type wireguard
 
