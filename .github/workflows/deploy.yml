@@ -1,0 +1,257 @@
+name: Deploy
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v2
+
+      - name: Set Github Short SHA
+        run: echo "GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c 1-7)" >> $GITHUB_ENV
+
+      - name: echo Github Short SHA
+        run: echo ${{ env.GITHUB_SHA_SHORT }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Maven Dependencies Cache
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: 'maven'
+
+      - name: Config Maven Settings Xml
+        uses: whelk-io/maven-settings-xml-action@v20
+        with:
+          repositories: '[{ "id": "seel-engr-seel-maven-server", "url": "https://seel-engr-003929763495.d.codeartifact.us-east-2.amazonaws.com/maven/seel-maven-server/" }]'
+          servers: '[{ "id": "seel-engr-seel-maven-server", "username": "aws", "password": "${env.CODEARTIFACT_AUTH_TOKEN}" }]'
+
+      - name: Set CodeArtifact Auth Token
+        run : echo "CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain seel-engr --domain-owner 003929763495 --query authorizationToken --output text)" >> $GITHUB_ENV
+
+      - name: Run Build Package
+        run: mvn clean package -Dmaven.test.skip=true
+
+      - name: Checkout Tool Repo
+        uses: actions/checkout@v3
+        with:
+          repository: kover-ai/deploy-self-service
+          ref: master
+          token: ${{ secrets.CLONE_TOKEN }}
+          path: 'deploy-self-service'
+
+      - name: Login AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, Push Image To AWS ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ github.event.repository.name }}
+          IMAGE_TAG: ${{ env.GITHUB_SHA_SHORT }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          echo "Pushing image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+  deploy-dev:
+    if: github.ref_name != 'master'
+    name: Deploy Dev
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://api-dev.seel.com
+    steps:
+      - name: Checkout Deploy Repo
+        uses: actions/checkout@v3
+        with:
+          repository: kover-ai/deploy-self-service
+          ref: master
+          token: ${{ secrets.CLONE_TOKEN }}
+
+      - name: Setup Helmfile
+        uses: mamezou-tech/setup-helmfile@v0.9.0
+
+      - name: Install Helm Ecr Plugins
+        run: |
+          helm plugin install https://github.com/vetyy/helm-ecr.git
+
+      - name: Setup Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '>=1.17.0'
+
+      - name: Print Tools Version
+        run: |
+          helmfile --version
+          helm version
+          kubectl version --client
+          go version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set Github Short SHA
+        run: echo "GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c 1-7)" >> $GITHUB_ENV
+
+      - name: echo Github Short SHA
+        run: echo ${{ env.GITHUB_SHA_SHORT }}
+
+      - name: Deploy Application To EKS
+        env:
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          NAME_SPACE: "china-tech-dev"
+          ENV_NAME: "dev"
+          CLUSTER_NAME: "Karma"
+          IMAGE_TAG: ${{ env.GITHUB_SHA_SHORT }}
+        run: |
+          aws eks update-kubeconfig --name $CLUSTER_NAME
+          helmfile -f helm-values/helmfile.yaml apply --set image.tag=$IMAGE_TAG --set fullnameOverride=$SERVICE_NAME
+
+  deploy-test:
+    if: github.ref_name == 'master'
+    name: Deploy Test
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: test
+      url: https://api-test.seel.com
+    steps:
+      - name: echo test
+        run: echo "hello world"
+
+  deploy-canary:
+    if: github.ref_name == 'master'
+    name: Deploy Canary
+    needs: deploy-test
+    runs-on: ubuntu-latest
+    environment:
+      name: canary
+      url: https://api.seel.com
+    steps:
+      - name: Checkout Deploy Repo
+        uses: actions/checkout@v3
+        with:
+          repository: kover-ai/deploy-self-service
+          ref: master
+          token: ${{ secrets.CLONE_TOKEN }}
+
+      - name: Setup Helmfile
+        uses: mamezou-tech/setup-helmfile@v0.9.0
+
+      - name: Install Helm Ecr Plugins
+        run: |
+          helm plugin install https://github.com/vetyy/helm-ecr.git
+
+      - name: Setup Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '>=1.17.0'
+
+      - name: Print Tools Version
+        run: |
+          helmfile --version
+          helm version
+          kubectl version --client
+          go version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set Github Short SHA
+        run: echo "GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c 1-7)" >> $GITHUB_ENV
+
+      - name: echo Github Short SHA
+        run: echo ${{ env.GITHUB_SHA_SHORT }}
+
+      - name: Deploy Application To EKS
+        env:
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          NAME_SPACE: "china-tech-canary"
+          ENV_NAME: "canary"
+          CLUSTER_NAME: "Leona"
+          IMAGE_TAG: ${{ env.GITHUB_SHA_SHORT }}
+        run: |
+          aws eks update-kubeconfig --name $CLUSTER_NAME
+          helmfile -f helm-values/helmfile.yaml apply --set image.tag=$IMAGE_TAG --set fullnameOverride=$SERVICE_NAME
+
+  deploy-prod:
+    if: github.ref_name == 'master'
+    name: Deploy Prod
+    needs: deploy-canary
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+      url: https://api.seel.com
+    steps:
+      - name: Checkout Deploy Repo
+        uses: actions/checkout@v3
+        with:
+          repository: kover-ai/deploy-self-service
+          ref: master
+          token: ${{ secrets.CLONE_TOKEN }}
+
+      - name: Setup Helmfile
+        uses: mamezou-tech/setup-helmfile@v0.9.0
+
+      - name: Install Helm Ecr Plugins
+        run: |
+          helm plugin install https://github.com/vetyy/helm-ecr.git
+
+      - name: Setup Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '>=1.17.0'
+
+      - name: Print Tools Version
+        run: |
+          helmfile --version
+          helm version
+          kubectl version --client
+          go version
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set Github Short SHA
+        run: echo "GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c 1-7)" >> $GITHUB_ENV
+
+      - name: echo Github Short SHA
+        run: echo ${{ env.GITHUB_SHA_SHORT }}
+
+      - name: Deploy Application To EKS
+        env:
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          NAME_SPACE: "china-tech-prod"
+          ENV_NAME: "prod"
+          CLUSTER_NAME: "Leona"
+          IMAGE_TAG: ${{ env.GITHUB_SHA_SHORT }}
+        run: |
+          aws eks update-kubeconfig --name $CLUSTER_NAME
+          helmfile -f helm-values/helmfile.yaml apply --set image.tag=$IMAGE_TAG --set fullnameOverride=$SERVICE_NAME
